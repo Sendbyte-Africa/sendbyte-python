@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sendbyte"
+version = "0.1.0"
+description = "SendByte Python SDK: the email API for Africa."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+authors = [{ name = "Echospectra Technology Limited" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Communications :: Email",
+  "Typing :: Typed",
+]
+# Zero runtime dependencies: stdlib urllib for transport.
+dependencies = []
+
+[project.urls]
+Homepage = "https://sendbyte.africa"
+Documentation = "https://docs.sendbyte.africa"
+Repository = "https://github.com/Sendbyte-Africa/sendbyte-python"
+Issues = "https://github.com/Sendbyte-Africa/sendbyte-python/issues"
+
+[tool.setuptools.packages.find]
+include = ["sendbyte*"]
