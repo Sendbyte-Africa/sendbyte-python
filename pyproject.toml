@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sendbyte"
-version = "0.1.0"
+version = "0.2.0"
 description = "SendByte Python SDK: the email API for Africa."
 readme = "README.md"
 license = { text = "MIT" }
@@ -21,6 +21,9 @@ classifiers = [
 # Zero runtime dependencies: stdlib urllib for transport.
 dependencies = []
 
+[tool.setuptools]
+include-package-data = true
+
 [project.urls]
 Homepage = "https://sendbyte.africa"
 Documentation = "https://docs.sendbyte.africa"
@@ -29,3 +32,7 @@ Issues = "https://github.com/Sendbyte-Africa/sendbyte-python/issues"
 
 [tool.setuptools.packages.find]
 include = ["sendbyte*"]
+
+# Ship the PEP 561 marker so type checkers treat the installed package as typed.
+[tool.setuptools.package-data]
+sendbyte = ["py.typed"]
