@@ -353,9 +353,11 @@ class SendByte:
 
     Retries 429 and 5xx responses (and network errors) with exponential
     backoff plus jitter, honoring Retry-After, up to ``max_attempts``. Each
-    attempt is bounded by ``timeout`` seconds. On POST /v1/emails an
-    idempotency key is generated and reused across retries when the caller did
-    not supply one, so a retried send cannot double-send.
+    attempt by the built-in transport is bounded by ``timeout`` seconds; a
+    custom ``transport`` you inject is responsible for its own timeout (it keeps
+    the historical ``(method, url, headers, body)`` signature). On POST
+    /v1/emails an idempotency key is generated and reused across retries when the
+    caller did not supply one, so a retried send cannot double-send.
     """
 
     def __init__(

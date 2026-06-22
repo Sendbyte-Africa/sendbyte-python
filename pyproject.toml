@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sendbyte"
-version = "0.2.0"
+version = "0.2.1"
 description = "SendByte Python SDK: the email API for Africa."
 readme = "README.md"
 license = { text = "MIT" }
