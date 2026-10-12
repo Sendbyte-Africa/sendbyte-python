@@ -6,7 +6,13 @@ import hmac
 import json
 import unittest
 
-from sendbyte import AsyncSendByte, SendByte, SendByteError, verify_webhook_signature
+from sendbyte import (
+    WEBHOOK_EVENT_TYPES,
+    AsyncSendByte,
+    SendByte,
+    SendByteError,
+    verify_webhook_signature,
+)
 
 EMAIL = {
     "id": "em_1",
@@ -122,7 +128,7 @@ class ClientTests(unittest.TestCase):
         async def run():
             return await client.send_email(from_="a@b.ng", to="c@d.ng", subject="Hi", text="x")
 
-        result = asyncio.get_event_loop().run_until_complete(run())
+        result = asyncio.run(run())
         self.assertEqual(result["id"], "em_1")
 
     def test_auto_idempotency_key_when_absent(self):
@@ -215,13 +221,325 @@ class ClientTests(unittest.TestCase):
             await client.replay_webhook("evt_1")
             return [c["url"] for c in transport.calls]
 
-        urls = asyncio.new_event_loop().run_until_complete(run())
+        urls = asyncio.run(run())
         self.assertEqual(
             urls,
             [
                 "https://api.test/v1/domains/dom_1",
                 "https://api.test/v1/webhooks/wh_1",
                 "https://api.test/v1/webhooks/deliveries/evt_1/replay",
+            ],
+        )
+
+
+DOMAIN_ID = "11111111-1111-4111-8111-111111111111"
+RECEIVED_ID = "22222222-2222-4222-8222-222222222222"
+ROUTE_ID = "33333333-3333-4333-8333-333333333333"
+
+
+def _client(transport):
+    return SendByte("sk_test_abc", base_url="https://api.test", transport=transport)
+
+
+class ReceivingTests(unittest.TestCase):
+    def test_receiving_settings_and_project_toggle(self):
+        transport = FakeTransport(200, {"enabled": True})
+        client = _client(transport)
+        client.receiving.get()
+        client.receiving.enable()
+        client.receiving.disable()
+        client.receiving.send_test("hello@abc.in.sendbyte.africa")
+        calls = [(c["method"], c["url"], c["body"]) for c in transport.calls]
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "https://api.test/v1/receiving", None),
+                ("POST", "https://api.test/v1/receiving/enable", {"acknowledge_quota": True}),
+                ("POST", "https://api.test/v1/receiving/disable", {}),
+                (
+                    "POST",
+                    "https://api.test/v1/receiving/test",
+                    {"to": "hello@abc.in.sendbyte.africa"},
+                ),
+            ],
+        )
+
+    def test_enable_always_acknowledges_quota(self):
+        transport = FakeTransport(200, {"enabled": True})
+        _client(transport).receiving.enable()
+        self.assertIs(transport.calls[0]["body"]["acknowledge_quota"], True)
+
+    def test_domain_receiving_setup(self):
+        transport = FakeTransport(200, {"domain_id": DOMAIN_ID, "status": "pending"})
+        client = _client(transport)
+        client.receiving.preflight(DOMAIN_ID)
+        client.receiving.preflight(DOMAIN_ID, subdomain="mail-in")
+        client.receiving.enable_domain(DOMAIN_ID)
+        client.receiving.enable_domain(DOMAIN_ID, "replies")
+        client.receiving.check_domain(DOMAIN_ID)
+        client.receiving.disable_domain(DOMAIN_ID)
+        base = f"https://api.test/v1/domains/{DOMAIN_ID}/receiving"
+        calls = [(c["method"], c["url"], c["body"]) for c in transport.calls]
+        self.assertEqual(
+            calls,
+            [
+                ("GET", f"{base}/preflight?subdomain=inbound", None),
+                ("GET", f"{base}/preflight?subdomain=mail-in", None),
+                ("POST", base, {"subdomain": "inbound"}),
+                ("POST", base, {"subdomain": "replies"}),
+                ("POST", f"{base}/check", {}),
+                ("DELETE", base, None),
+            ],
+        )
+
+    def test_received_list_encodes_query_and_passes_status_lists(self):
+        transport = FakeTransport(200, {"data": [], "has_more": False, "next_cursor": None})
+        client = _client(transport)
+        client.received.list()
+        client.received.list(
+            status="spam,held",
+            domain_id=DOMAIN_ID,
+            search="invoice 42",
+            days=7,
+            limit=10,
+            before="cur_1",
+        )
+        client.received.list(status=["delivered", "forwarded"])
+        urls = [c["url"] for c in transport.calls]
+        self.assertEqual(
+            urls,
+            [
+                "https://api.test/v1/received",
+                (
+                    "https://api.test/v1/received?status=spam,held"
+                    f"&domain_id={DOMAIN_ID}&search=invoice+42&days=7&limit=10&before=cur_1"
+                ),
+                "https://api.test/v1/received?status=delivered,forwarded",
+            ],
+        )
+
+    def test_received_reads(self):
+        transport = FakeTransport(200, {"url": "https://s3.test/x"})
+        client = _client(transport)
+        client.received.get(RECEIVED_ID)
+        client.received.stats()
+        client.received.stats(days=7, domain_id=DOMAIN_ID)
+        client.received.attachment(RECEIVED_ID, "0")
+        client.received.raw(RECEIVED_ID)
+        base = f"https://api.test/v1/received/{RECEIVED_ID}"
+        calls = [(c["method"], c["url"]) for c in transport.calls]
+        self.assertEqual(
+            calls,
+            [
+                ("GET", base),
+                ("GET", "https://api.test/v1/received/stats?days=30"),
+                ("GET", f"https://api.test/v1/received/stats?days=7&domain_id={DOMAIN_ID}"),
+                ("GET", f"{base}/attachments/0"),
+                ("GET", f"{base}/raw"),
+            ],
+        )
+
+    def test_reply_body(self):
+        transport = FakeTransport(202, {"id": "em_2", "status": "queued", "thread_id": "th_1"})
+        result = _client(transport).received.reply(
+            RECEIVED_ID,
+            text="Thanks",
+            from_="support@paylink.ng",
+            subject="Re: Help",
+            reply_all=True,
+            idempotency_key="reply-1",
+        )
+        self.assertEqual(result["thread_id"], "th_1")
+        call = transport.calls[0]
+        self.assertEqual(call["method"], "POST")
+        self.assertEqual(call["url"], f"https://api.test/v1/received/{RECEIVED_ID}/reply")
+        self.assertEqual(
+            call["body"],
+            {
+                "idempotency_key": "reply-1",
+                "from": "support@paylink.ng",
+                "text": "Thanks",
+                "subject": "Re: Help",
+                "reply_all": True,
+            },
+        )
+
+    def test_reply_requires_text_or_html(self):
+        transport = FakeTransport(202)
+        with self.assertRaises(ValueError):
+            _client(transport).received.reply(RECEIVED_ID)
+        self.assertEqual(transport.calls, [])
+
+    def test_reply_auto_idempotency_key_reused_across_retries(self):
+        transport = SequenceTransport(
+            [
+                (503, json.dumps({"error": {"code": "unavailable"}}), {"retry-after": "0"}),
+                (429, json.dumps({"error": {"code": "rate_limited"}}), {"retry-after": "0"}),
+                (202, json.dumps({"id": "em_2", "status": "queued", "thread_id": None}), {}),
+            ]
+        )
+        result = _client(transport).received.reply(RECEIVED_ID, html="<p>Thanks</p>")
+        self.assertEqual(result["id"], "em_2")
+        self.assertEqual(len(transport.calls), 3)
+        keys = {c["body"]["idempotency_key"] for c in transport.calls}
+        self.assertEqual(len(keys), 1)
+        self.assertRegex(
+            keys.pop(),
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        )
+
+    def test_async_reply_auto_idempotency_key_reused_across_retries(self):
+        transport = SequenceTransport(
+            [
+                (500, json.dumps({"error": {"code": "internal"}}), {"retry-after": "0"}),
+                (202, json.dumps({"id": "em_2", "status": "queued", "thread_id": None}), {}),
+            ]
+        )
+        client = AsyncSendByte("sk_test_abc", base_url="https://api.test", transport=transport)
+        asyncio.run(
+            client.received.reply(RECEIVED_ID, text="Thanks")
+        )
+        self.assertEqual(len(transport.calls), 2)
+        first, second = (c["body"]["idempotency_key"] for c in transport.calls)
+        self.assertTrue(first)
+        self.assertEqual(first, second)
+
+    def test_separate_replies_get_separate_keys(self):
+        transport = FakeTransport(202, {"id": "em_2", "status": "queued", "thread_id": None})
+        client = _client(transport)
+        client.received.reply(RECEIVED_ID, text="One")
+        client.received.reply(RECEIVED_ID, text="Two")
+        keys = [c["body"]["idempotency_key"] for c in transport.calls]
+        self.assertNotEqual(keys[0], keys[1])
+
+    def test_inbound_routes(self):
+        transport = FakeTransport(201, {"id": ROUTE_ID, "match_type": "exact"})
+        client = _client(transport)
+        client.inbound_routes.list()
+        client.inbound_routes.list(DOMAIN_ID)
+        client.inbound_routes.create(
+            "exact",
+            domain_id=DOMAIN_ID,
+            match_value="support",
+            action="forward",
+            forward_to=["team@paylink.ng"],
+            endpoint_ids=None,
+        )
+        client.inbound_routes.update(ROUTE_ID, enabled=False, endpoint_ids=None)
+        calls = [(c["method"], c["url"], c["body"]) for c in transport.calls]
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "https://api.test/v1/inbound-routes", None),
+                ("GET", f"https://api.test/v1/inbound-routes?domain_id={DOMAIN_ID}", None),
+                (
+                    "POST",
+                    "https://api.test/v1/inbound-routes",
+                    {
+                        "match_type": "exact",
+                        "domain_id": DOMAIN_ID,
+                        "match_value": "support",
+                        "action": "forward",
+                        "forward_to": ["team@paylink.ng"],
+                    },
+                ),
+                (
+                    "PATCH",
+                    f"https://api.test/v1/inbound-routes/{ROUTE_ID}",
+                    {"enabled": False, "endpoint_ids": None},
+                ),
+            ],
+        )
+
+    def test_inbound_route_rejects_unknown_fields(self):
+        client = _client(FakeTransport())
+        with self.assertRaises(TypeError):
+            client.inbound_routes.create("exact", match_valu="typo")
+        with self.assertRaises(TypeError):
+            client.inbound_routes.update(ROUTE_ID, match_type="prefix")
+
+    def test_delete_route_handles_204(self):
+        transport = SequenceTransport([(204, "", {})])
+        result = _client(transport).inbound_routes.delete(ROUTE_ID)
+        self.assertIsNone(result)
+        self.assertEqual(transport.calls[0]["method"], "DELETE")
+        self.assertEqual(
+            transport.calls[0]["url"], f"https://api.test/v1/inbound-routes/{ROUTE_ID}"
+        )
+
+    def test_email_conversation(self):
+        transport = FakeTransport(200, {"thread_id": "th_1", "replies": 1, "data": []})
+        result = _client(transport).emails.conversation("em_1")
+        self.assertEqual(result["replies"], 1)
+        self.assertEqual(transport.calls[0]["url"], "https://api.test/v1/emails/em_1/conversation")
+
+    def test_user_agent_version(self):
+        transport = FakeTransport(200, {})
+        _client(transport).receiving.get()
+        self.assertEqual(transport.calls[0]["headers"]["user-agent"], "sendbyte-python/0.3.0")
+
+    def test_webhook_event_types_include_received(self):
+        self.assertIn("email.received", WEBHOOK_EVENT_TYPES)
+
+    def test_async_client_has_every_receiving_method(self):
+        transport = SequenceTransport([(200, json.dumps({"ok": True}), {})])
+        client = AsyncSendByte("sk_test_abc", base_url="https://api.test", transport=transport)
+
+        async def run():
+            await client.receiving.get()
+            await client.receiving.enable()
+            await client.receiving.disable()
+            await client.receiving.send_test("a@x.in.sendbyte.africa")
+            await client.receiving.preflight(DOMAIN_ID, "mail-in")
+            await client.receiving.enable_domain(DOMAIN_ID)
+            await client.receiving.check_domain(DOMAIN_ID)
+            await client.receiving.disable_domain(DOMAIN_ID)
+            await client.received.list(status=["spam", "held"], limit=5)
+            await client.received.get(RECEIVED_ID)
+            await client.received.stats(days=14)
+            await client.received.attachment(RECEIVED_ID, "1")
+            await client.received.raw(RECEIVED_ID)
+            await client.received.reply(RECEIVED_ID, text="Hi", idempotency_key="k1")
+            await client.inbound_routes.list(DOMAIN_ID)
+            await client.inbound_routes.create("catch_all", action="drop")
+            await client.inbound_routes.update(ROUTE_ID, action="webhook")
+            await client.inbound_routes.delete(ROUTE_ID)
+            await client.get_email_conversation("em_1")
+
+        asyncio.run(run())
+        dbase = f"https://api.test/v1/domains/{DOMAIN_ID}/receiving"
+        rbase = f"https://api.test/v1/received/{RECEIVED_ID}"
+        calls = [(c["method"], c["url"], c["body"]) for c in transport.calls]
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "https://api.test/v1/receiving", None),
+                ("POST", "https://api.test/v1/receiving/enable", {"acknowledge_quota": True}),
+                ("POST", "https://api.test/v1/receiving/disable", {}),
+                ("POST", "https://api.test/v1/receiving/test", {"to": "a@x.in.sendbyte.africa"}),
+                ("GET", f"{dbase}/preflight?subdomain=mail-in", None),
+                ("POST", dbase, {"subdomain": "inbound"}),
+                ("POST", f"{dbase}/check", {}),
+                ("DELETE", dbase, None),
+                ("GET", "https://api.test/v1/received?status=spam,held&limit=5", None),
+                ("GET", rbase, None),
+                ("GET", "https://api.test/v1/received/stats?days=14", None),
+                ("GET", f"{rbase}/attachments/1", None),
+                ("GET", f"{rbase}/raw", None),
+                ("POST", f"{rbase}/reply", {"idempotency_key": "k1", "text": "Hi"}),
+                ("GET", f"https://api.test/v1/inbound-routes?domain_id={DOMAIN_ID}", None),
+                (
+                    "POST",
+                    "https://api.test/v1/inbound-routes",
+                    {"match_type": "catch_all", "action": "drop"},
+                ),
+                (
+                    "PATCH",
+                    f"https://api.test/v1/inbound-routes/{ROUTE_ID}",
+                    {"action": "webhook"},
+                ),
+                ("DELETE", f"https://api.test/v1/inbound-routes/{ROUTE_ID}", None),
+                ("GET", "https://api.test/v1/emails/em_1/conversation", None),
             ],
         )
 

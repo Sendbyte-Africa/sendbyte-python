@@ -64,6 +64,7 @@ asyncio.run(main())
 sendbyte.emails.send(from_=..., to=..., subject=..., html=...)
 sendbyte.emails.get("em_123")
 sendbyte.emails.list(limit=20, status="delivered")
+sendbyte.emails.conversation("em_123")
 ```
 
 `to`, `cc`, `bcc`, and `reply_to` accept a single address or a list. Pass `idempotency_key` to make retries safe, `scheduled_at` for future sends, and `template_id` with `variables` to render a server side template.
@@ -90,6 +91,38 @@ sendbyte.webhooks.list()
 sendbyte.webhooks.disable(endpoint["id"])
 sendbyte.webhooks.replay("evt_123")
 ```
+
+### Receiving email
+
+Receive mail on a subdomain of a verified domain, read it, and reply in the same thread. Received emails count toward your monthly email quota, the same as sent emails; `enable()` acknowledges that for you. Spam and virus emails never count.
+
+```python
+sendbyte.receiving.enable()
+setup = sendbyte.receiving.enable_domain("dom_123", subdomain="inbound")
+# publish setup["mx_record"], then confirm it is live
+sendbyte.receiving.check_domain("dom_123")
+
+page = sendbyte.received.list(status="received,delivered", limit=20)
+email = sendbyte.received.get(page["data"][0]["id"])
+print(email["from"], email["subject"], email["text"])
+
+sendbyte.received.reply(email["id"], text="Thanks, we are on it.")
+```
+
+Routes decide what happens to mail arriving at matching addresses: send it to your webhooks, forward it, or drop it.
+
+```python
+sendbyte.inbound_routes.create(
+    "exact",
+    domain_id="dom_123",
+    match_value="support",
+    action="forward",
+    forward_to=["team@paylink.ng"],
+)
+sendbyte.inbound_routes.list("dom_123")
+```
+
+Subscribe a webhook to `email.received` to get the whole email, bodies included, as it arrives. On the async client the same methods are awaitable under `sendbyte.receiving`, `sendbyte.received` and `sendbyte.inbound_routes`. See the [receiving guide](https://docs.sendbyte.africa/guides/receiving).
 
 ## Verifying webhook signatures
 
